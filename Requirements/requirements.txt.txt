@@ -1,0 +1,9 @@
+re
+PyPDF2
+json
+transformers
+torch
+datasets
+os
+PyPDF2
+gradio
