@@ -1,6 +1,5 @@
 # TasteBot: Your AI Cooking Assistant
 
-![TasteBot Banner](screenshots/tastebot_banner.png)
 
 TasteBot is a custom fine-tuned GPT-based conversational assistant designed to answer cooking questions, generate recipes, and provide culinary guidance for users of all skill levels. Powered by state-of-the-art language models and a user-friendly Gradio interface, TasteBot brings the power of AI to your kitchen.
 
