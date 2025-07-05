@@ -1,7 +1,7 @@
 The requirements.txt file may not include some of the libraries which are used in the project install 
 them by reading the error.
 
-Latest versions of the libraries should be installed . by using this syntax in requirements.txt file in seperate lines transformers==4.49.0
+Latest versions of the libraries should be installed . by using this syntax in requirements.txt file in seperate lines like transformers==4.49.0
 
 The code is complete and should run without errors and problems but you have to include config.json file and datasets of your own as they
 are not provided in the repository.
