@@ -57,7 +57,7 @@ TasteBot is a custom fine-tuned GPT-based conversational assistant designed to a
 ### 1. Clone the Repository
 
 ```sh
-git clone https://github.com/Muhamad-Ahmed/Custom-Gpt-TasteBot-.git
+git clone https://github.com/ahmed-shahidd/Custom-Gpt-TasteBot-.git
 cd Custom-Gpt-TasteBot-/Code
 ```
 
