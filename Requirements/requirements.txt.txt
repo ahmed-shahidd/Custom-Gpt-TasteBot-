@@ -1,9 +1,8 @@
-re
-PyPDF2
-json
-transformers
-torch
-datasets
-os
-PyPDF2
-gradio
+huggingface_hub==0.25.2
+gradio>=4.0.0
+transformers>=4.35.0
+torch>=2.0.0
+PyPDF2>=3.0.0
+accelerate>=0.20.0
+sentencepiece>=0.1.99
+protobuf>=3.20.0
