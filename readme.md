@@ -48,7 +48,7 @@ TasteBot is a custom fine-tuned GPT-based conversational assistant designed to a
 
 ### PDF Upload
 
-![TasteBot PDF Upload](/Screenshots/pdf%20upload%20.png)
+![TasteBot PDF Upload](/Screenshots/pdf%20upload.png)
 
 ---
 
