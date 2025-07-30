@@ -7,7 +7,7 @@ Original file is located at
     https://colab.research.google.com/drive/1sYiD_F5WNRyn-iWVc--WuaGtnCDaGry4
 """
 
-!pip install -r requirements.txt
+
 
 import re
 import PyPDF2
@@ -731,195 +731,535 @@ for model_dir in model_dirs:
         print(f"Error uploading {model_dir}: {e}")
 
 import gradio as gr
+import os
+import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import torch
 import PyPDF2
 from concurrent.futures import ThreadPoolExecutor
+import tempfile
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Check if GPU is available for better performance
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 
-# Optimize CUDA performance if available
 if device.type == "cuda":
     torch.backends.cudnn.benchmark = True
 
-# Load models and tokenizers with FP16 for speed optimization if GPU is available
+# Hugging Face model paths (make sure these models exist and are accessible)
 model_dirs = [
     "muhammadAhmed22/fine_tuned_gpt2",
-    "muhammadAhmed22/MiriFurgpt2-recipes",
+    "muhammadAhmed22/MiriFurgpt2-recipes", 
     "muhammadAhmed22/auhide-chef-gpt-en"
 ]
 
 models = {}
 tokenizers = {}
 
-for model_dir in model_dirs:
-    model_name = model_dir.split("/")[-1]
-    try:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
-            cache_dir="./cache"
-        )
-        model.to(device)
-
-        # Compile the model for better performance (requires PyTorch 2.0+)
-        if torch.__version__ >= "2.0":
-            model = torch.compile(model)
-
-        tokenizer = AutoTokenizer.from_pretrained(model_dir, cache_dir="./cache")
-
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        models[model_name] = model
-        tokenizers[model_name] = tokenizer
-
-        print(f"Loaded model and tokenizer from {model_dir}.")
-
-        # Batch warm-up inference to reduce initial response time
-        dummy_inputs = ["Hello", "What is a recipe?", "Explain cooking basics"]
-        for dummy_input in dummy_inputs:
+def load_models():
+    """Load models with better error handling"""
+    loaded_models = []
+    
+    for model_dir in model_dirs:
+        model_name = model_dir.split("/")[-1]
+        try:
+            logger.info(f"Loading model: {model_dir}")
+            
+            # Load tokenizer first
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_dir, 
+                cache_dir="./cache",
+                trust_remote_code=True
+            )
+            
+            # Load model with appropriate settings for Hugging Face Spaces
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                torch_dtype=torch.float16 if device.type == "cuda" else torch.float32,
+                cache_dir="./cache",
+                trust_remote_code=True,
+                low_cpu_mem_usage=True
+            )
+            model.to(device)
+            
+            # Set pad token if not available
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            # Store models
+            models[model_name] = model
+            tokenizers[model_name] = tokenizer
+            loaded_models.append(model_name)
+            
+            logger.info(f"Successfully loaded: {model_name}")
+            
+            # Warm up model with a simple generation
+            dummy_input = "Hello"
             input_ids = tokenizer.encode(dummy_input, return_tensors='pt').to(device)
             with torch.no_grad():
-                model.generate(input_ids, max_new_tokens=1)
-
-    except Exception as e:
-        print(f"Failed to load model from {model_dir}: {e}")
-        continue
+                model.generate(input_ids, max_new_tokens=1, do_sample=False)
+                
+        except Exception as e:
+            logger.error(f"Failed to load model from {model_dir}: {e}")
+            continue
+    
+    return loaded_models
 
 def get_response(prompt, model_name, user_type):
+    """Generate response with better error handling"""
+    if not prompt or not prompt.strip():
+        return "Please provide a question or prompt."
+    
     if model_name not in models:
-        return "Model not loaded correctly."
+        available_models = list(models.keys())
+        if available_models:
+            model_name = available_models[0]  # Use first available model
+            logger.warning(f"Model not found, using: {model_name}")
+        else:
+            return "No models are currently loaded. Please try again later."
 
-    model = models[model_name]
-    tokenizer = tokenizers[model_name]
+    try:
+        model = models[model_name]
+        tokenizer = tokenizers[model_name]
 
-    # Define different prompt templates based on user type
-    user_type_templates = {
-        "Professional Chef": f"As a professional chef, {prompt}\nAnswer:",
-        "Home Cook": f"As a home cook, {prompt}\nAnswer:",
-        "Beginner": f"Explain in simple terms: {prompt}\nAnswer:",
-        "Food Enthusiast": f"As a food enthusiast, {prompt}\nAnswer:"
-    }
+        # User type templates
+        user_type_templates = {
+            "Professional Chef": f"As a professional chef, {prompt}\nAnswer:",
+            "Home Cook": f"As a home cook, {prompt}\nAnswer:",
+            "Beginner": f"Explain in simple terms: {prompt}\nAnswer:",
+            "Food Enthusiast": f"As a food enthusiast, {prompt}\nAnswer:"
+        }
 
-    # Get the appropriate prompt based on user type
-    prompt_template = user_type_templates.get(user_type, f"{prompt}\nAnswer:")
+        prompt_template = user_type_templates.get(user_type, f"{prompt}\nAnswer:")
 
-    encoding = tokenizer(
-        prompt_template,
-        return_tensors='pt',
-        padding=True,
-        truncation=True,
-        max_length=300  # Increased length for larger inputs
-    ).to(device)
+        # Tokenize input
+        encoding = tokenizer(
+            prompt_template,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=300
+        ).to(device)
 
-    # Reduce max_new_tokens for faster response time
-    max_new_tokens = 80  # Reduced to speed up response time
+        # Generate response
+        with torch.no_grad():
+            output = model.generate(
+                input_ids=encoding['input_ids'],
+                attention_mask=encoding['attention_mask'],
+                max_new_tokens=80,
+                num_beams=1,
+                repetition_penalty=1.1,
+                temperature=0.8,
+                top_p=0.9,
+                early_stopping=True,
+                pad_token_id=tokenizer.pad_token_id,
+                do_sample=True
+            )
 
-    with torch.no_grad():
-        output = model.generate(
-            input_ids=encoding['input_ids'],
-            attention_mask=encoding['attention_mask'],
-            max_new_tokens=max_new_tokens,
-            num_beams=1,         # Using greedy decoding (faster)
-            repetition_penalty=1.1,
-            temperature=0.8,     # Slightly increased for diversity, but still quick
-            top_p=0.9,           # Higher value for more flexibility in response
-            early_stopping=True,
-            pad_token_id=tokenizer.pad_token_id
-        )
-
-    response = tokenizer.decode(output[0], skip_special_tokens=True)
-    return response.strip()
+        # Decode response
+        response = tokenizer.decode(output[0], skip_special_tokens=True)
+        
+        # Extract only the generated part (remove the prompt)
+        if "Answer:" in response:
+            response = response.split("Answer:")[-1].strip()
+        
+        return response if response else "I apologize, but I couldn't generate a proper response. Please try rephrasing your question."
+        
+    except Exception as e:
+        logger.error(f"Error generating response: {e}")
+        return f"Sorry, I encountered an error while processing your request. Please try again."
 
 def extract_text_from_file(file):
+    """Extract text from uploaded PDF with better error handling"""
     if file is None:
         return ""
 
     try:
-        # Use multithreading for faster PDF text extraction
-        with ThreadPoolExecutor() as executor:
-            with open(file.name, 'rb') as f:
-                pdf_reader = PyPDF2.PdfReader(f)
-                texts = list(executor.map(lambda page: page.extract_text() or "", pdf_reader.pages))
-                return " ".join(texts)
+        # Create a temporary file to handle the upload properly
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+            # Copy uploaded file content to temp file
+            with open(file.name, 'rb') as uploaded_file:
+                tmp_file.write(uploaded_file.read())
+            tmp_file_path = tmp_file.name
+
+        # Extract text from the temporary PDF file
+        with open(tmp_file_path, 'rb') as f:
+            pdf_reader = PyPDF2.PdfReader(f)
+            text_parts = []
+            
+            for page_num, page in enumerate(pdf_reader.pages):
+                try:
+                    text = page.extract_text()
+                    if text and text.strip():
+                        text_parts.append(text.strip())
+                except Exception as e:
+                    logger.warning(f"Error extracting text from page {page_num}: {e}")
+                    continue
+            
+            # Clean up temp file
+            os.unlink(tmp_file_path)
+            
+            return " ".join(text_parts) if text_parts else ""
+            
     except Exception as e:
-        print(f"Error reading file: {e}")
+        logger.error(f"Error reading PDF file: {e}")
         return ""
 
 def process_input(prompt, model_name, file, user_type):
-    if prompt and prompt.strip():
-        return get_response(prompt, model_name, user_type)
-    elif file:
-        extracted_text = extract_text_from_file(file)
-        if extracted_text:
-            return get_response(extracted_text, model_name, user_type)
+    """Process user input with better validation"""
+    try:
+        if prompt and prompt.strip():
+            return get_response(prompt.strip(), model_name, user_type)
+        elif file:
+            extracted_text = extract_text_from_file(file)
+            if extracted_text and extracted_text.strip():
+                # Limit extracted text length to avoid token limits
+                if len(extracted_text) > 1000:
+                    extracted_text = extracted_text[:1000] + "..."
+                return get_response(f"Please analyze this recipe: {extracted_text}", model_name, user_type)
+            else:
+                return "Failed to extract text from the uploaded file. Please make sure it's a valid PDF with readable text."
         else:
-            return "Failed to extract text from the uploaded file."
-    else:
-        return "Please provide a prompt or upload a file."
+            return "Please provide a cooking question or upload a PDF file."
+    except Exception as e:
+        logger.error(f"Error in process_input: {e}")
+        return "Sorry, I encountered an error while processing your request. Please try again."
 
-# Gradio Interface with Modern Design
-with gr.Blocks(css="""
+# Enhanced CSS (keeping your existing CSS but making it more compatible)
+enhanced_css = """
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+    --primary-orange: #FF6B35;
+    --primary-red: #D32F2F;
+    --warm-cream: #FFF8E7;
+    --sage-green: #87A96B;
+    --dark-brown: #3E2723;
+    --light-gray: #F5F5F5;
+    --gold: #FFD700;
+    --shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+    --shadow-hover: 0 12px 40px rgba(0, 0, 0, 0.15);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
 body {
-    background-color: #f4f4f4;
-    font-family: 'Arial, sans-serif';
+    background: linear-gradient(135deg, var(--warm-cream) 0%, #FFF5E6 100%);
+    font-family: 'Inter', sans-serif;
+    color: var(--dark-brown);
+    line-height: 1.6;
 }
-.title {
-    font-size: 2.5rem;
-    font-weight: bold;
-    color: #ff6347;
+
+.hero-header {
+    background: linear-gradient(135deg, var(--primary-orange) 0%, var(--primary-red) 100%);
+    padding: 3rem 2rem;
     text-align: center;
-    margin-bottom: 1rem;
+    box-shadow: var(--shadow);
+    position: relative;
+    overflow: hidden;
 }
-.container {
-    max-width: 900px;
-    margin: auto;
-    padding: 2rem;
-    background-color: #ffffff;
-    border-radius: 10px;
-    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
-}
-.button {
-    background-color: #ff6347;
+
+.hero-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 4rem;
+    font-weight: 900;
     color: white;
-    padding: 0.8rem 1.5rem;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+    margin-bottom: 1rem;
+    position: relative;
+    z-index: 1;
+}
+
+.hero-subtitle {
+    font-size: 1.3rem;
+    color: rgba(255,255,255,0.9);
+    font-weight: 300;
+    position: relative;
+    z-index: 1;
+    max-width: 600px;
+    margin: 0 auto;
+}
+
+.modern-main-container {
+    max-width: 1400px;
+    margin: -3rem auto 4rem;
+    padding: 0;
+    background: transparent;
+}
+
+.content-hero {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    padding: 4rem 2rem;
+    margin-bottom: 3rem;
+    border-radius: 0 0 40px 40px;
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+}
+
+.content-hero-inner {
+    position: relative;
+    z-index: 2;
+    text-align: center;
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.content-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 3.5rem;
+    font-weight: 900;
+    color: white;
+    margin-bottom: 1rem;
+    text-shadow: 2px 2px 8px rgba(0,0,0,0.5);
+}
+
+.content-description {
+    font-size: 1.4rem;
+    color: rgba(255,255,255,0.9);
+    font-weight: 300;
+    line-height: 1.6;
+}
+
+.modern-layout-row {
+    gap: 3rem;
+    padding: 0 2rem;
+    align-items: flex-start;
+}
+
+.modern-card {
+    background: white;
+    border-radius: 24px;
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: 0 15px 35px rgba(0, 0, 0, 0.08);
+    border: 1px solid rgba(255, 107, 53, 0.1);
+    transition: all 0.3s cubic-bezier(0.23, 1, 0.32, 1);
+    position: relative;
+    overflow: hidden;
+    height: auto;
+}
+
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    margin: 0;
+    padding: 2rem 2rem 1.5rem 2rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    border-radius: 24px 24px 0 0;
+}
+
+.card-icon {
+    font-size: 2.5rem;
+    width: 70px;
+    height: 70px;
+    background: linear-gradient(135deg, var(--primary-orange) 0%, var(--primary-red) 100%);
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 8px 25px rgba(255, 107, 53, 0.3);
+    flex-shrink: 0;
+}
+
+.chef-icon {
+    background: linear-gradient(135deg, var(--sage-green) 0%, #9CAF88 100%);
+    box-shadow: 0 8px 25px rgba(135, 169, 107, 0.3);
+}
+
+.card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--dark-brown);
+    margin: 0 0 0.5rem 0;
+    line-height: 1.2;
+}
+
+.card-subtitle {
     font-size: 1rem;
-    border: none;
-    border-radius: 5px;
-    cursor: pointer;
+    color: #666;
+    margin: 0;
+    line-height: 1.4;
 }
-.button:hover {
-    background-color: #ff4500;
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+    .modern-layout-row {
+        flex-direction: column;
+        gap: 2rem;
+    }
+    
+    .content-title {
+        font-size: 2.5rem;
+    }
+    
+    .hero-title {
+        font-size: 3rem;
+    }
 }
-""") as demo:
 
-    gr.Markdown("<div class='title'>🧑🏻‍🍳 TasteBot: Your AI Cooking Assistant</div>")
+@media (max-width: 768px) {
+    .content-hero {
+        padding: 3rem 1.5rem;
+    }
+    
+    .content-title {
+        font-size: 2rem;
+    }
+    
+    .hero-title {
+        font-size: 2.5rem;
+    }
+    
+    .modern-layout-row {
+        padding: 0 1rem;
+    }
+}
+"""
 
-    user_types = ["Professional Chef", "Home Cook", "Beginner", "Food Enthusiast"]
+# Initialize models on startup
+def initialize_app():
+    """Initialize the application"""
+    logger.info("Initializing TasteBot...")
+    loaded_models = load_models()
+    
+    if not loaded_models:
+        logger.warning("No models loaded successfully!")
+        return ["No models available"]
+    
+    logger.info(f"Successfully loaded {len(loaded_models)} models: {loaded_models}")
+    return loaded_models
 
-    with gr.Tabs():
-        with gr.TabItem("🔎 Ask a Cooking Question"):
-            with gr.Row():
-                with gr.Column(scale=2):
-                    prompt = gr.Textbox(label="📝 Prompt", placeholder="Enter your cooking question here...", lines=2)
-                    model_name = gr.Radio(label="🤖 Choose Model", choices=list(models.keys()), interactive=True)
-                    user_type = gr.Dropdown(label="👤 User Type", choices=user_types, value="Home Cook")
-                    file = gr.File(label="📄 Upload PDF (optional)", file_types=[".pdf"])
-                    submit_button = gr.Button("Get Response", elem_classes="button")
+# Load models at startup
+available_models = initialize_app()
+user_types = ["Professional Chef", "Home Cook", "Beginner", "Food Enthusiast"]
 
-                with gr.Column(scale=3):
-                    response = gr.Textbox(
-                        label="🍽️ Response",
-                        placeholder="Your answer will appear here...",
-                        lines=10,
-                        interactive=False,
-                        show_copy_button=True
+# Create Gradio interface
+with gr.Blocks(css=enhanced_css, title="TasteBot - Culinary AI Assistant", theme=gr.themes.Soft()) as demo:
+    
+    # Hero Header
+    gr.HTML("""
+        <div class="hero-header">
+            <h1 class="hero-title">🍳 TasteBot</h1>
+            <p class="hero-subtitle">Your Personal Culinary AI Assistant - From Kitchen Novice to Master Chef</p>
+        </div>
+    """)
+    
+    # Main Content
+    with gr.Row(elem_classes="modern-main-container"):
+        with gr.Column():
+            
+            # Modern Hero Section for Main Content
+            gr.HTML("""
+                <div class="content-hero">
+                    <div class="content-hero-inner">
+                        <h1 class="content-title">🍳 Start Cooking with AI</h1>
+                        <p class="content-description">Ask questions, get expert advice, and discover new culinary techniques</p>
+                    </div>
+                </div>
+            """)
+            
+            # Main Interface
+            with gr.Row(elem_classes="modern-layout-row"):
+                # Left Column - Input
+                with gr.Column(scale=1):
+                    with gr.Column(elem_classes="modern-card"):
+                        gr.HTML("""
+                            <div class="card-header">
+                                <div class="card-icon">💭</div>
+                                <div class="card-title-section">
+                                    <h3 class="card-title">Your Question</h3>
+                                    <p class="card-subtitle">What cooking challenge can I help you solve?</p>
+                                </div>
+                            </div>
+                        """)
+                        
+                        prompt = gr.Textbox(
+                            label="Ask your cooking question",
+                            placeholder="Example: How do I make perfect scrambled eggs?",
+                            lines=4,
+                            container=True
+                        )
+                    
+                    user_type = gr.Dropdown(
+                        label="Your Cooking Level",
+                        choices=user_types,
+                        value="Home Cook"
+                    )
+                    
+                    model_name = gr.Dropdown(
+                        label="Choose AI Model",
+                        choices=available_models,
+                        value=available_models[0] if available_models else None
+                    )
+                    
+                    file = gr.File(
+                        label="Upload Recipe PDF (Optional)",
+                        file_types=[".pdf"]
+                    )
+                    
+                    submit_button = gr.Button(
+                        "✨ Get Cooking Advice",
+                        variant="primary",
+                        size="lg"
                     )
 
-        submit_button.click(fn=process_input, inputs=[prompt, model_name, file, user_type], outputs=response)
+                # Right Column - Response
+                with gr.Column(scale=1):
+                    with gr.Column(elem_classes="modern-card"):
+                        gr.HTML("""
+                            <div class="card-header">
+                                <div class="card-icon chef-icon">👨‍🍳</div>
+                                <div class="card-title-section">
+                                    <h3 class="card-title">Chef's Advice</h3>
+                                    <p class="card-subtitle">Expert culinary guidance tailored for you</p>
+                                </div>
+                            </div>
+                        """)
+                        
+                        response = gr.Textbox(
+                            label="Response",
+                            placeholder="Your personalized cooking advice will appear here...",
+                            lines=15,
+                            interactive=False,
+                            show_copy_button=True,
+                            container=True
+                        )
 
+    # Footer
+    gr.HTML("""
+        <div style="background: #3E2723; color: white; text-align: center; padding: 2rem; margin-top: 2rem;">
+            <p>🍳 Powered by Advanced Culinary AI Models | Made with ❤️ for Food Lovers Everywhere</p>
+        </div>
+    """)
+
+    # Event handlers
+    submit_button.click(
+        fn=process_input, 
+        inputs=[prompt, model_name, file, user_type], 
+        outputs=response
+    )
+    
+    prompt.submit(
+        fn=process_input, 
+        inputs=[prompt, model_name, file, user_type], 
+        outputs=response
+    )
+
+# Launch the app
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=True, debug=True)
+    demo.launch(
+        server_name="0.0.0.0",
+        share=False,  # Set to False for Hugging Face Spaces
+        debug=False   # Set to False for production
+    )
